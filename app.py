@@ -4,59 +4,69 @@ import os
 import subprocess
 import json
 
-#openai client
+# OpenAI client
 openai_client = OpenAI(
-    api_key=config.OPENAI_API_KEY
+    api_key=config.OPENAI_API_KEY,
 )
-#first tell chatgpt the answers form as:
-# json likes {action:[shell_1, shell_2,..]}
+CHATGPT_MODEL = "gpt-4o"
+
+# 对话历史记录
+conversation = []
+
+# 初始化对话，告知格式要求
+initial_messages = [
+    {"role": "user", "content": "在Q&A的模式下，是否可以按照要求输出格式？比如，“问题”是一个“用户指令”，回答，以类似json格式的方式输出完成“用户指令”的shell脚本，具体来说，输出的“回答”，以这种方式：{answer:非脚本的解释性语言,action:[shell_1, shell_2,...]}(其中shell_n，是以文本格式呈现的完整脚本文件。"},
+    {"role": "user", "content": '举例说明:用户指令：请显示当前目录；你回答：{"answer":"根据用户指令，生成shell脚本","actions":[{"shell": "ls -l"}]}'},
+    {"role": "user", "content": '不需要再重复用户指令'},
+    {"role": "user", "content": '不用加"json"'}
+]
+
+conversation.extend(initial_messages)
+
 response = openai_client.chat.completions.create(
-    model="gpt-4o",
-    messages=[
-        {"role":"user", "content":"在Q&A的模式下，是否可以按照要求输出格式？比如，“问题”是一个“命令”，回答，以类似json格式的方式输出完成“命令”的shell脚本，具体来说，输出的“回答”，以这种方式：action:[shell_1, shell_2,...](其中shell_n，是以文本格式呈现的完整脚本文件。"},
-        {"role":"user", "content":"我的意图是，我通过chatgpt API调用的方式，我向chatgpt发出指令，然后，chagpt根据指令，生成shell脚本，然后，我解析出脚本，交给后台服务进程或者调用chatgpt api的当前进程，去执行脚本， 指令，然后，再把执行结果返回给你chatgpt。同时有必要的话，也呈现给用户，或者等到chatgpt收到脚本执行结果之后，再生成回答，呈现给用户。"}
-    ]
+    model=CHATGPT_MODEL,
+    messages=conversation
 )
+
 print(response.choices[0].message.content)
+conversation.append({"role": "assistant", "content": response.choices[0].message.content})
 
-#get user's commans
+# 获取用户命令
 user_cmd = input("请输入您的指令:\n")
-chatgpt_actions_str = openai_client.chat.completions.create(
-    model="gpt-4o",
-    messages=[
-        {"role":"user","content":user_cmd}
-    ]
+conversation.append({"role": "user", "content": user_cmd})
+
+# 调用ChatGPT生成shell脚本
+response = openai_client.chat.completions.create(
+    model=CHATGPT_MODEL,
+    messages=conversation
 )
-#get action shell file
-scripts = chatgpt_actions_str['action']
-for script in scripts:
-    for script_name, script_content in script.items():
-        # 保存脚本到文件
-        script_path = f"./{script_name}.sh"
-        with open(script_path, "w") as script_file:
-            script_file.write(script_content)
 
-        # 给予执行权限
-        os.chmod(script_path, 0o755)
+chatgpt_actions_str = response.choices[0].message.content
+conversation.append({"role": "assistant", "content": chatgpt_actions_str})
 
-        # 执行脚本
-        result = subprocess.run([script_path], capture_output=True, text=True)
+print(chatgpt_actions_str)
 
-        # 获取执行结果
-        output = result.stdout
-        error = result.stderr
-        returncode = result.returncode
+# 解析并执行生成的shell脚本
+actions = json.loads(chatgpt_actions_str).get("actions", [])
+results = []
 
-        # 打印或处理执行结果
-        print(f"Output: {output}")
-        print(f"Error: {error}")
-        print(f"Return Code: {returncode}")
-        #tell chatgpt the result of shell execution
-        result_shell_exe = f"Output: {output};" + f"Error: {error};" + f"Return Code: {returncode}"
-        exe_res = openai_client.chat.completions.create(
-            model="gpt-4o",
-            messages=[
-                {"role":"sys","content":result_shell_exe}
-            ]
-        )
-        print(exe_res.choices[0].message.content)
+for action in actions:
+    script = list(action.values())[0]
+    result = subprocess.run(script, shell=True, capture_output=True, text=True)
+    results.append({
+        "script": script,
+        "output": result.stdout,
+        "error": result.stderr
+    })
+
+# 将执行结果发送回ChatGPT
+execution_results = json.dumps(results, indent=2)
+conversation.append({"role": "system", "content": execution_results})
+
+response = openai_client.chat.completions.create(
+    model=CHATGPT_MODEL,
+    messages=conversation
+)
+
+final_response = response.choices[0].message.content
+print(final_response)
